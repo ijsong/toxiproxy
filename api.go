@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -34,7 +36,10 @@ type ApiServer struct {
 	Collection *ProxyCollection
 	Metrics    *metricsContainer
 	Logger     *zerolog.Logger
-	http       *http.Server
+
+	mu        sync.Mutex
+	http      *http.Server
+	boundAddr string
 }
 
 const (
@@ -56,6 +61,13 @@ func (server *ApiServer) Listen(addr string) error {
 		Str("address", addr).
 		Msg("Starting Toxiproxy HTTP server")
 
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	server.mu.Lock()
+	server.boundAddr = lis.Addr().String()
 	server.http = &http.Server{
 		Addr:         addr,
 		Handler:      server.Routes(),
@@ -63,8 +75,9 @@ func (server *ApiServer) Listen(addr string) error {
 		ReadTimeout:  read_timeout,
 		IdleTimeout:  60 * time.Second,
 	}
+	server.mu.Unlock()
 
-	err := server.http.ListenAndServe()
+	err = server.http.Serve(lis)
 	if err == http.ErrServerClosed {
 		err = nil
 	}
@@ -72,10 +85,19 @@ func (server *ApiServer) Listen(addr string) error {
 	return err
 }
 
+func (server *ApiServer) Address() string {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.boundAddr
+}
+
 func (server *ApiServer) Shutdown() error {
+	server.mu.Lock()
 	if server.http == nil {
+		server.mu.Unlock()
 		return nil
 	}
+	server.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), wait_timeout)
 	defer cancel()
